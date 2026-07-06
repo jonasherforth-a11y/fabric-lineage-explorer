@@ -331,6 +331,13 @@ def source_badge(source: str) -> str:
     return f'<span class="source-badge source-{cls}">{source}</span>'
 
 
+def _get(obj, key, default=None):
+    """Get attribute or dict key — handles both dataclass instances and dicts."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 # ─── Sidebar ────────────────────────────────────────────────────────────────────
 # Auto-detect if running on Streamlit Cloud (no local filesystem access)
 _DEMO_JSON = Path(__file__).parent / "data" / "demo_lineage.json"
@@ -1286,18 +1293,25 @@ elif page == "🧬 Model Insights":
 
     if lineage and lineage.get("_models_raw"):
         models_raw = lineage["_models_raw"]
-        model_names = [m.name for m in models_raw]
+        model_names = [_get(m, "name", "") for m in models_raw]
         selected_model_name = st.selectbox("Select Semantic Model", model_names)
-        selected_model = next((m for m in models_raw if m.name == selected_model_name), None)
+        selected_model = next((m for m in models_raw if _get(m, "name") == selected_model_name), None)
 
         if selected_model:
-            # Run enhanced scan
-            @st.cache_data
-            def _enhanced_model_scan(path_str):
-                return scan_semantic_model_enhanced(Path(path_str))
+            model_path = _get(selected_model, "path", "")
 
-            enhanced = _enhanced_model_scan(str(selected_model.path))
-            dep_graph = enhanced.get("measure_dependencies", {})
+            # Run enhanced scan only if path is valid (local mode)
+            enhanced = None
+            if model_path and Path(str(model_path)).exists():
+                @st.cache_data
+                def _enhanced_model_scan(path_str):
+                    return scan_semantic_model_enhanced(Path(path_str))
+                enhanced = _enhanced_model_scan(str(model_path))
+
+            # Build dep_graph from enhanced scan or from engine
+            dep_graph = enhanced.get("measure_dependencies", {}) if enhanced else {}
+            if not dep_graph and "engine" in st.session_state:
+                dep_graph = st.session_state["engine"].dep_graph
 
             tab1, tab2, tab3, tab4 = st.tabs(["📐 DAX Dependencies", "🗄️ Data Sources", "🔐 Roles (RLS)", "📖 Expressions"])
 
@@ -1362,7 +1376,7 @@ elif page == "🧬 Model Insights":
             # --- Data Sources Tab ---
             with tab2:
                 st.subheader("Data Sources (Comprehensive)")
-                data_sources = enhanced.get("data_sources", [])
+                data_sources = enhanced.get("data_sources", []) if enhanced else []
                 if data_sources:
                     # Group by type
                     by_type = {}
@@ -1382,7 +1396,7 @@ elif page == "🧬 Model Insights":
             # --- Roles Tab ---
             with tab3:
                 st.subheader("Row-Level Security Roles")
-                roles = enhanced.get("roles", [])
+                roles = enhanced.get("roles", []) if enhanced else []
                 if roles:
                     for role in roles:
                         with st.expander(f"🔐 {role.name} ({len(role.table_permissions)} table permissions)"):
@@ -1397,7 +1411,7 @@ elif page == "🧬 Model Insights":
             # --- Expressions Tab ---
             with tab4:
                 st.subheader("Named Expressions & Parameters")
-                expressions = enhanced.get("expressions", [])
+                expressions = enhanced.get("expressions", []) if enhanced else []
                 if expressions:
                     params = [e for e in expressions if e.is_parameter]
                     queries = [e for e in expressions if not e.is_parameter]
@@ -1420,7 +1434,7 @@ elif page == "🧬 Model Insights":
             # Enhanced relationships
             st.markdown("---")
             st.subheader("Relationships")
-            rels = enhanced.get("relationships", [])
+            rels = enhanced.get("relationships", []) if enhanced else []
             if rels:
                 rel_data = []
                 for r in rels:
@@ -1523,15 +1537,15 @@ elif page == "📑 Report Insights":
 
                 # Find the model
                 if lineage.get("_models_raw"):
-                    linked_model = next((m for m in lineage["_models_raw"] if m.name == model_name), None)
+                    linked_model = next((m for m in lineage["_models_raw"] if _get(m, "name") == model_name), None)
                     if linked_model:
                         unused = []
-                        for table in linked_model.tables:
-                            if table.is_hidden:
+                        for table in _get(linked_model, "tables", []):
+                            if _get(table, "is_hidden", False):
                                 continue
-                            for col in table.columns:
-                                if not col.is_hidden and (table.name, col.name) not in used_fields:
-                                    unused.append({"Table": table.name, "Column": col.name})
+                            for col in _get(table, "columns", []):
+                                if not _get(col, "is_hidden", False) and (_get(table, "name"), _get(col, "name")) not in used_fields:
+                                    unused.append({"Table": _get(table, "name"), "Column": _get(col, "name")})
                         if unused:
                             st.dataframe(unused[:100], use_container_width=True)
                             st.caption(f"Showing {min(len(unused), 100)} of {len(unused)} unused fields")
