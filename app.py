@@ -1293,6 +1293,7 @@ elif page == "🧬 Model Insights":
 
     if lineage and lineage.get("_models_raw"):
         models_raw = lineage["_models_raw"]
+        engine = _get_or_build_engine(lineage)
         model_names = [_get(m, "name", "") for m in models_raw]
         selected_model_name = st.selectbox("Select Semantic Model", model_names)
         selected_model = next((m for m in models_raw if _get(m, "name") == selected_model_name), None)
@@ -1310,8 +1311,11 @@ elif page == "🧬 Model Insights":
 
             # Build dep_graph from enhanced scan or from engine
             dep_graph = enhanced.get("measure_dependencies", {}) if enhanced else {}
-            if not dep_graph and "lineage_engine" in st.session_state:
-                dep_graph = st.session_state["lineage_engine"].dep_graph
+            if not dep_graph:
+                dep_graph = engine.dep_graph
+                # Filter to measures belonging to this model's tables
+                model_tables = {_get(t, "name") for t in _get(selected_model, "tables", [])}
+                dep_graph = {k: v for k, v in dep_graph.items() if v.get("table") in model_tables}
 
             tab1, tab2, tab3, tab4 = st.tabs(["📐 DAX Dependencies", "🗄️ Data Sources", "🔐 Roles (RLS)", "📖 Expressions"])
 
