@@ -1,0 +1,5 @@
+requests>=2.31.0
+msal>=1.28.0
+rich>=13.7.0
+streamlit>=1.30.0
+streamlit-agraph>=0.0.45
