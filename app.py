@@ -1310,8 +1310,8 @@ elif page == "🧬 Model Insights":
 
             # Build dep_graph from enhanced scan or from engine
             dep_graph = enhanced.get("measure_dependencies", {}) if enhanced else {}
-            if not dep_graph and "engine" in st.session_state:
-                dep_graph = st.session_state["engine"].dep_graph
+            if not dep_graph and "lineage_engine" in st.session_state:
+                dep_graph = st.session_state["lineage_engine"].dep_graph
 
             tab1, tab2, tab3, tab4 = st.tabs(["📐 DAX Dependencies", "🗄️ Data Sources", "🔐 Roles (RLS)", "📖 Expressions"])
 
@@ -1450,7 +1450,26 @@ elif page == "🧬 Model Insights":
                     })
                 st.dataframe(rel_data, use_container_width=True)
             else:
-                st.info("No relationships found.")
+                # Fallback: show relationships from dict-based _models_raw
+                model_rels = _get(selected_model, "relationships", [])
+                if model_rels:
+                    rel_data = []
+                    for r in model_rels:
+                        r_from_table = _get(r, "from_table", "")
+                        r_from_col = _get(r, "from_column", "")
+                        r_to_table = _get(r, "to_table", "")
+                        r_to_col = _get(r, "to_column", "")
+                        cross = _get(r, "cross_filtering", "")
+                        active = "✓" if _get(r, "is_active", True) else "✗"
+                        rel_data.append({
+                            "From": f"{r_from_table}[{r_from_col}]",
+                            "To": f"{r_to_table}[{r_to_col}]",
+                            "Filter": cross,
+                            "Active": active,
+                        })
+                    st.dataframe(rel_data, use_container_width=True)
+                else:
+                    st.info("No relationships found.")
     else:
         st.warning("No data loaded. Use the sidebar to scan or load lineage data.")
 
