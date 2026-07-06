@@ -332,10 +332,9 @@ def source_badge(source: str) -> str:
 
 
 # ─── Sidebar ────────────────────────────────────────────────────────────────────
-# Auto-detect if running on Streamlit Cloud (local solution folder won't exist)
+# Auto-detect if running on Streamlit Cloud (no local filesystem access)
 _DEMO_JSON = Path(__file__).parent / "data" / "demo_lineage.json"
-_LOCAL_PATH = Path(r"c:\Users\XJEH\Repos\Analytics\solution")
-_IS_CLOUD = not _LOCAL_PATH.exists()
+_IS_CLOUD = _DEMO_JSON.exists() and not any(Path(".").glob("*.pbir"))
 
 with st.sidebar:
     st.markdown("<h1 style='text-align:center; font-size:3rem;'>🔗</h1>", unsafe_allow_html=True)
@@ -348,8 +347,7 @@ with st.sidebar:
         load_mode = st.radio("Data Source", ["Local PBIP", "Fabric API", "Load JSON"], horizontal=True)
 
     if load_mode == "Local PBIP":
-        default_path = str(_LOCAL_PATH)
-        solution_path = st.text_input("Solution folder path", value=default_path)
+        solution_path = st.text_input("Solution folder path", placeholder="e.g. C:/repos/my-project/solution")
         scan_btn = st.button("🔍 Scan Now", type="primary", use_container_width=True)
     elif load_mode == "Fabric API":
         workspace_name = st.text_input("Workspace name", placeholder="e.g. My Workspace")
