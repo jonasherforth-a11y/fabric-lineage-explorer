@@ -1484,100 +1484,107 @@ elif page == "📑 Report Insights":
 
     if lineage and lineage.get("_reports_raw"):
         reports_raw = lineage["_reports_raw"]
-        report_names = [r.name for r in reports_raw]
+        report_names = [_get(r, "name", "") for r in reports_raw]
         selected_report_name = st.selectbox("Select Report", report_names)
-        selected_report = next((r for r in reports_raw if r.name == selected_report_name), None)
+        selected_report = next((r for r in reports_raw if _get(r, "name") == selected_report_name), None)
 
         if selected_report:
-            @st.cache_data
-            def _enhanced_report_scan(path_str):
-                return scan_report_enhanced(Path(path_str))
+            report_path = _get(selected_report, "path", "")
 
-            enhanced_rpt = _enhanced_report_scan(str(selected_report.path))
+            # Run enhanced scan only if path is valid (local mode)
+            enhanced_rpt = None
+            if report_path and Path(str(report_path)).exists():
+                @st.cache_data
+                def _enhanced_report_scan(path_str):
+                    return scan_report_enhanced(Path(path_str))
+                enhanced_rpt = _enhanced_report_scan(str(report_path))
 
-            # Summary metrics
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Pages", enhanced_rpt.get("page_count", 0))
-            c2.metric("Visuals", enhanced_rpt.get("visual_count", 0))
-            c3.metric("Unique Fields Used", len(enhanced_rpt.get("field_usage_map", {})))
+            if enhanced_rpt:
+                # Summary metrics
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Pages", enhanced_rpt.get("page_count", 0))
+                c2.metric("Visuals", enhanced_rpt.get("visual_count", 0))
+                c3.metric("Unique Fields Used", len(enhanced_rpt.get("field_usage_map", {})))
 
-            tab1, tab2, tab3 = st.tabs(["📄 Pages & Visuals", "📊 Field Usage", "🔍 Unused Fields"])
+                tab1, tab2, tab3 = st.tabs(["📄 Pages & Visuals", "📊 Field Usage", "🔍 Unused Fields"])
 
-            # --- Pages & Visuals Tab ---
-            with tab1:
-                pages = enhanced_rpt.get("pages", [])
-                for pg in pages:
-                    with st.expander(f"📄 {pg.display_name or pg.name} ({len(pg.visuals)} visuals)"):
-                        if pg.visuals:
-                            visual_types = {}
-                            for v in pg.visuals:
-                                visual_types[v.visual_type] = visual_types.get(v.visual_type, 0) + 1
+                # --- Pages & Visuals Tab ---
+                with tab1:
+                    pages = enhanced_rpt.get("pages", [])
+                    for pg in pages:
+                        with st.expander(f"📄 {pg.display_name or pg.name} ({len(pg.visuals)} visuals)"):
+                            if pg.visuals:
+                                visual_types = {}
+                                for v in pg.visuals:
+                                    visual_types[v.visual_type] = visual_types.get(v.visual_type, 0) + 1
 
-                            st.markdown("**Visual types:** " + ", ".join(f"{t} ({c})" for t, c in sorted(visual_types.items())))
-                            st.markdown("---")
-                            for v in pg.visuals:
-                                fields_str = ", ".join(f"`{f[1]}.{f[2]}`" for f in v.fields[:5])
-                                more = f" +{len(v.fields)-5} more" if len(v.fields) > 5 else ""
-                                st.markdown(f"  - **{v.name}** ({v.visual_type}): {fields_str}{more}")
-                        else:
-                            st.info("No visuals on this page.")
+                                st.markdown("**Visual types:** " + ", ".join(f"{t} ({c})" for t, c in sorted(visual_types.items())))
+                                st.markdown("---")
+                                for v in pg.visuals:
+                                    fields_str = ", ".join(f"`{f[1]}.{f[2]}`" for f in v.fields[:5])
+                                    more = f" +{len(v.fields)-5} more" if len(v.fields) > 5 else ""
+                                    st.markdown(f"  - **{v.name}** ({v.visual_type}): {fields_str}{more}")
+                            else:
+                                st.info("No visuals on this page.")
 
-            # --- Field Usage Tab ---
-            with tab2:
-                st.subheader("Field Usage Across Visuals")
-                usage_map = enhanced_rpt.get("field_usage_map", {})
-                if usage_map:
-                    # Sort by most used
-                    sorted_fields = sorted(usage_map.items(), key=lambda x: len(x[1]), reverse=True)
-                    usage_data = []
-                    for key, usages in sorted_fields[:50]:
-                        parts = key.split("|")
-                        field_type, table, field_name = parts[0], parts[1], parts[2]
-                        visual_names = list(set(u.visual_name for u in usages))
-                        usage_data.append({
-                            "Type": field_type,
-                            "Table": table,
-                            "Field": field_name,
-                            "Used In": len(usages),
-                            "Visuals": ", ".join(visual_names[:3]) + ("..." if len(visual_names) > 3 else ""),
-                        })
-                    st.dataframe(usage_data, use_container_width=True)
-                else:
-                    st.info("No field usage data extracted.")
-
-            # --- Unused Fields Tab ---
-            with tab3:
-                st.subheader("Potentially Unused Fields")
-                st.markdown("*Fields in the semantic model NOT referenced by any visual in this report.*")
-
-                # Get model fields from linked model
-                model_name = enhanced_rpt.get("semantic_model_name", "")
-                usage_map = enhanced_rpt.get("field_usage_map", {})
-                used_fields = set()
-                for key in usage_map:
-                    parts = key.split("|")
-                    used_fields.add((parts[1], parts[2]))
-
-                # Find the model
-                if lineage.get("_models_raw"):
-                    linked_model = next((m for m in lineage["_models_raw"] if _get(m, "name") == model_name), None)
-                    if linked_model:
-                        unused = []
-                        for table in _get(linked_model, "tables", []):
-                            if _get(table, "is_hidden", False):
-                                continue
-                            for col in _get(table, "columns", []):
-                                if not _get(col, "is_hidden", False) and (_get(table, "name"), _get(col, "name")) not in used_fields:
-                                    unused.append({"Table": _get(table, "name"), "Column": _get(col, "name")})
-                        if unused:
-                            st.dataframe(unused[:100], use_container_width=True)
-                            st.caption(f"Showing {min(len(unused), 100)} of {len(unused)} unused fields")
-                        else:
-                            st.success("All visible fields are used!")
+                # --- Field Usage Tab ---
+                with tab2:
+                    st.subheader("Field Usage Across Visuals")
+                    usage_map = enhanced_rpt.get("field_usage_map", {})
+                    if usage_map:
+                        # Sort by most used
+                        sorted_fields = sorted(usage_map.items(), key=lambda x: len(x[1]), reverse=True)
+                        usage_data = []
+                        for key, usages in sorted_fields[:50]:
+                            parts = key.split("|")
+                            field_type, table, field_name = parts[0], parts[1], parts[2]
+                            visual_names = list(set(u.visual_name for u in usages))
+                            usage_data.append({
+                                "Type": field_type,
+                                "Table": table,
+                                "Field": field_name,
+                                "Used In": len(usages),
+                                "Visuals": ", ".join(visual_names[:3]) + ("..." if len(visual_names) > 3 else ""),
+                            })
+                        st.dataframe(usage_data, use_container_width=True)
                     else:
-                        st.info(f"Linked model '{model_name}' not found in scan.")
-                else:
-                    st.info("No model data available for cross-reference.")
+                        st.info("No field usage data extracted.")
+
+                # --- Unused Fields Tab ---
+                with tab3:
+                    st.subheader("Potentially Unused Fields")
+                    st.markdown("*Fields in the semantic model NOT referenced by any visual in this report.*")
+
+                    # Get model fields from linked model
+                    model_name = enhanced_rpt.get("semantic_model_name", "")
+                    usage_map = enhanced_rpt.get("field_usage_map", {})
+                    used_fields = set()
+                    for key in usage_map:
+                        parts = key.split("|")
+                        used_fields.add((parts[1], parts[2]))
+
+                    # Find the model
+                    if lineage.get("_models_raw"):
+                        linked_model = next((m for m in lineage["_models_raw"] if _get(m, "name") == model_name), None)
+                        if linked_model:
+                            unused = []
+                            for table in _get(linked_model, "tables", []):
+                                if _get(table, "is_hidden", False):
+                                    continue
+                                for col in _get(table, "columns", []):
+                                    if not _get(col, "is_hidden", False) and (_get(table, "name"), _get(col, "name")) not in used_fields:
+                                        unused.append({"Table": _get(table, "name"), "Column": _get(col, "name")})
+                            if unused:
+                                st.dataframe(unused[:100], use_container_width=True)
+                                st.caption(f"Showing {min(len(unused), 100)} of {len(unused)} unused fields")
+                            else:
+                                st.success("All visible fields are used!")
+                        else:
+                            st.info(f"Linked model '{model_name}' not found in scan.")
+                    else:
+                        st.info("No model data available for cross-reference.")
+            else:
+                st.info("Report Insights requires local PBIP access to scan report pages and visuals. This feature is not available in cloud/JSON mode.")
     else:
         st.warning("No data loaded. Use the sidebar to scan or load lineage data.")
 
