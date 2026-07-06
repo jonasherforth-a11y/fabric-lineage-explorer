@@ -342,7 +342,7 @@ with st.sidebar:
     st.markdown("---")
 
     if _IS_CLOUD:
-        load_mode = st.radio("Data Source", ["Demo Data", "Upload JSON", "Fabric API"], horizontal=True)
+        load_mode = st.radio("Data Source", ["Athene Lineage Overview", "Upload JSON", "Fabric API"], horizontal=True)
     else:
         load_mode = st.radio("Data Source", ["Local PBIP", "Upload JSON", "Fabric API"], horizontal=True)
 
@@ -350,9 +350,9 @@ with st.sidebar:
     if load_mode == "Local PBIP":
         solution_path = st.text_input("Solution folder path", placeholder="e.g. C:/repos/my-project/solution")
         scan_btn = st.button("🔍 Scan Now", type="primary", use_container_width=True)
-    elif load_mode == "Demo Data":
-        st.caption("Pre-loaded sample data from a Power BI solution with 66 reports, 31 models, 267 tables.")
-        scan_btn = st.button("📊 Load Demo", type="primary", use_container_width=True)
+    elif load_mode == "Athene Lineage Overview":
+        st.caption("Pre-loaded lineage data from the Athene Power BI solution with 66 reports, 31 models, 267 tables.")
+        scan_btn = st.button("📊 Load Athene", type="primary", use_container_width=True)
     elif load_mode == "Upload JSON":
         uploaded_file = st.file_uploader("Upload lineage JSON", type=["json"], help="Upload a previously exported lineage JSON file")
         if uploaded_file is not None:
@@ -398,8 +398,8 @@ if scan_btn:
         else:
             with st.spinner("Scanning PBIP artifacts..."):
                 lineage = load_from_scan(solution_path)
-    elif load_mode == "Demo Data":
-        with st.spinner("Loading demo data..."):
+    elif load_mode == "Athene Lineage Overview":
+        with st.spinner("Loading Athene lineage..."):
             lineage = load_from_json(str(_DEMO_JSON))
     elif load_mode == "Upload JSON":
         with st.spinner("Loading uploaded JSON..."):
