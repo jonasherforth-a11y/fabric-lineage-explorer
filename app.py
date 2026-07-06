@@ -341,10 +341,7 @@ with st.sidebar:
     st.title("Fabric Lineage Explorer")
     st.markdown("---")
 
-    if _IS_CLOUD:
-        load_mode = st.radio("Data Source", ["Load JSON", "Fabric API"], horizontal=True)
-    else:
-        load_mode = st.radio("Data Source", ["Local PBIP", "Fabric API", "Load JSON"], horizontal=True)
+    load_mode = st.radio("Data Source", ["Local PBIP", "Fabric API", "Load JSON"], horizontal=True)
 
     if load_mode == "Local PBIP":
         solution_path = st.text_input("Solution folder path", placeholder="e.g. C:/repos/my-project/solution")
