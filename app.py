@@ -337,7 +337,7 @@ _DEMO_JSON = Path(__file__).parent / "data" / "demo_lineage.json"
 _IS_CLOUD = not Path(r"c:\Users").exists()  # Simple: Windows paths don't exist on Linux cloud
 
 with st.sidebar:
-    st.markdown("<h1 style='text-align:center; font-size:3rem;'>🔗</h1>", unsafe_allow_html=True)
+    st.image(str(Path(__file__).parent / "assets" / "logo.png"), width=120)
     st.title("Lineage Explorer")
     st.markdown("---")
 
@@ -1837,3 +1837,12 @@ elif page == "🔎 Search":
             for i in results["issues"]:
                 icon = "❌" if i["severity"] == "error" else "⚠️"
                 st.markdown(f"- {icon} **{i['type']}**: {i['message']}")
+
+# ─── Footer ─────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown(
+    "<div style='text-align:center; color:#888; font-size:0.85rem; padding:1rem 0;'>"
+    "Built by <strong>Jonas Herforth</strong> · twoday"
+    "</div>",
+    unsafe_allow_html=True,
+)
