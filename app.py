@@ -334,18 +334,29 @@ def source_badge(source: str) -> str:
 # ─── Sidebar ────────────────────────────────────────────────────────────────────
 # Auto-detect if running on Streamlit Cloud (no local filesystem access)
 _DEMO_JSON = Path(__file__).parent / "data" / "demo_lineage.json"
-_IS_CLOUD = _DEMO_JSON.exists() and not any(Path(".").glob("*.pbir"))
+_IS_CLOUD = not Path(r"c:\Users").exists()  # Simple: Windows paths don't exist on Linux cloud
 
 with st.sidebar:
     st.markdown("<h1 style='text-align:center; font-size:3rem;'>🔗</h1>", unsafe_allow_html=True)
     st.title("Fabric Lineage Explorer")
     st.markdown("---")
 
-    load_mode = st.radio("Data Source", ["Local PBIP", "Fabric API", "Load JSON"], horizontal=True)
+    if _IS_CLOUD:
+        load_mode = st.radio("Data Source", ["Demo Data", "Upload JSON", "Fabric API"], horizontal=True)
+    else:
+        load_mode = st.radio("Data Source", ["Local PBIP", "Upload JSON", "Fabric API"], horizontal=True)
 
+    scan_btn = False
     if load_mode == "Local PBIP":
         solution_path = st.text_input("Solution folder path", placeholder="e.g. C:/repos/my-project/solution")
         scan_btn = st.button("🔍 Scan Now", type="primary", use_container_width=True)
+    elif load_mode == "Demo Data":
+        st.caption("Pre-loaded sample data from a Power BI solution with 66 reports, 31 models, 267 tables.")
+        scan_btn = st.button("📊 Load Demo", type="primary", use_container_width=True)
+    elif load_mode == "Upload JSON":
+        uploaded_file = st.file_uploader("Upload lineage JSON", type=["json"], help="Upload a previously exported lineage JSON file")
+        if uploaded_file is not None:
+            scan_btn = True
     elif load_mode == "Fabric API":
         workspace_name = st.text_input("Workspace name", placeholder="e.g. My Workspace")
         st.caption("Uses Azure CLI auth (MSAL interactive login)")
@@ -362,10 +373,6 @@ with st.sidebar:
                     st.error(f"Auth failed: {e}")
         with col_scan:
             scan_btn = st.button("☁️ Connect & Scan", type="primary")
-    else:
-        default_json = str(_DEMO_JSON) if _DEMO_JSON.exists() else str(Path(__file__).parent / "lineage_output.json")
-        json_path = st.text_input("Lineage JSON path", value=default_json)
-        scan_btn = st.button("📂 Load", type="primary", use_container_width=True)
 
     st.markdown("---")
     st.markdown("**Navigation**")
@@ -379,24 +386,30 @@ with st.sidebar:
 # ─── Load Data ──────────────────────────────────────────────────────────────────
 lineage = None
 
-# Auto-load demo data on cloud if no data loaded yet
-if _IS_CLOUD and "lineage" not in st.session_state and _DEMO_JSON.exists():
+# Auto-load demo data on first visit if available
+if "lineage" not in st.session_state and _DEMO_JSON.exists():
     lineage = load_from_json(str(_DEMO_JSON))
     st.session_state["lineage"] = lineage
 
 if scan_btn:
     if load_mode == "Local PBIP":
-        with st.spinner("Scanning PBIP artifacts..."):
-            lineage = load_from_scan(solution_path)
+        if not solution_path:
+            st.warning("Please enter a solution folder path.")
+        else:
+            with st.spinner("Scanning PBIP artifacts..."):
+                lineage = load_from_scan(solution_path)
+    elif load_mode == "Demo Data":
+        with st.spinner("Loading demo data..."):
+            lineage = load_from_json(str(_DEMO_JSON))
+    elif load_mode == "Upload JSON":
+        with st.spinner("Loading uploaded JSON..."):
+            lineage = json.loads(uploaded_file.read().decode("utf-8"))
     elif load_mode == "Fabric API":
         if not workspace_name:
             st.warning("Please enter a workspace name.")
         else:
             with st.spinner(f"Connecting to Fabric API — workspace '{workspace_name}'..."):
                 lineage = load_from_api(workspace_name)
-    else:
-        with st.spinner("Loading JSON..."):
-            lineage = load_from_json(json_path)
     if lineage:
         st.session_state["lineage"] = lineage
         # Clear cached engine so it rebuilds with new data
