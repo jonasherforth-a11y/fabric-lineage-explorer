@@ -431,33 +431,61 @@ def _build_engine_from_lineage(lineage_data: dict):
     engine = LineageEngine()
 
     models_raw = lineage_data.get("_models_raw")
-    if models_raw and models_raw is not None and len(models_raw) > 0 and hasattr(models_raw[0], "tables"):
-        # Local PBIP mode: models_raw are SemanticModelDef dataclass instances
-        all_tables = []
-        all_relationships = []
-        for model in models_raw:
-            all_tables.extend(model.tables)
-            all_relationships.extend(model.relationships)
-
-        engine.build_from_local(all_tables, all_relationships, [])
+    if models_raw and len(models_raw) > 0:
+        first = models_raw[0]
+        if hasattr(first, "tables") and not isinstance(first, dict):
+            # Local PBIP mode: models_raw are SemanticModelDef dataclass instances
+            all_tables = []
+            all_relationships = []
+            for model in models_raw:
+                all_tables.extend(model.tables)
+                all_relationships.extend(model.relationships)
+            engine.build_from_local(all_tables, all_relationships, [])
+        else:
+            # JSON mode: models_raw are dicts — convert to simple namespace objects
+            from types import SimpleNamespace
+            all_tables = []
+            all_relationships = []
+            for model in models_raw:
+                for t_dict in model.get("tables", []):
+                    table = SimpleNamespace(
+                        name=t_dict.get("name", ""),
+                        is_hidden=t_dict.get("is_hidden", False),
+                        columns=[SimpleNamespace(
+                            name=c.get("name", ""),
+                            data_type=c.get("data_type", ""),
+                            source_column=c.get("source_column", ""),
+                            is_hidden=c.get("is_hidden", False),
+                        ) for c in t_dict.get("columns", [])],
+                        measures=[SimpleNamespace(
+                            name=m.get("name", ""),
+                            expression=m.get("expression", ""),
+                            table=m.get("table", ""),
+                        ) for m in t_dict.get("measures", [])],
+                        partitions=[SimpleNamespace(
+                            name=p.get("name", ""),
+                            source_type=p.get("source_type", ""),
+                            source_expression=p.get("source_expression", ""),
+                            query_group=p.get("query_group", ""),
+                        ) for p in t_dict.get("partitions", [])],
+                        lineage_tag=t_dict.get("lineage_tag", ""),
+                        data_sources=t_dict.get("data_sources", []),
+                    )
+                    all_tables.append(table)
+                for r_dict in model.get("relationships", []):
+                    rel = SimpleNamespace(
+                        from_table=r_dict.get("from_table", ""),
+                        from_column=r_dict.get("from_column", ""),
+                        to_table=r_dict.get("to_table", ""),
+                        to_column=r_dict.get("to_column", ""),
+                        cross_filtering=r_dict.get("cross_filtering", ""),
+                        is_active=r_dict.get("is_active", True),
+                    )
+                    all_relationships.append(rel)
+            engine.build_from_local(all_tables, all_relationships, [])
     else:
-        # API mode: build from dict data
-        tables_data = []
-        relationships_data = []
-        measures_data = []
-        partitions_data = {}
-
-        for model in lineage_data.get("models", []):
-            for t in model.get("tables", []):
-                tables_data.append({
-                    "name": t.get("name", ""),
-                    "columns": t.get("columns_detail", []),
-                    "isHidden": t.get("is_hidden", False),
-                })
-            for r in model.get("relationships_detail", []):
-                relationships_data.append(r)
-
-        engine.build_from_api(tables_data, relationships_data, measures_data, partitions_data)
+        # Fallback: API mode with minimal data
+        engine.build_from_api([], [], [], {})
 
     return engine
 
