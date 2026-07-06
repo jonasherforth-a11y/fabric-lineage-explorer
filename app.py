@@ -1,5 +1,5 @@
 """
-Fabric Lineage Explorer — Interactive Streamlit UI
+Lineage Explorer — Interactive Streamlit UI
 
 Provides:
 - Dashboard overview (reports, models, sources, issues)
@@ -35,7 +35,7 @@ from pbip_insights import (
 
 # ─── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Fabric Lineage Explorer",
+    page_title="Lineage Explorer",
     page_icon="🔗",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -338,7 +338,7 @@ _IS_CLOUD = not Path(r"c:\Users").exists()  # Simple: Windows paths don't exist 
 
 with st.sidebar:
     st.markdown("<h1 style='text-align:center; font-size:3rem;'>🔗</h1>", unsafe_allow_html=True)
-    st.title("Fabric Lineage Explorer")
+    st.title("Lineage Explorer")
     st.markdown("---")
 
     if _IS_CLOUD:
