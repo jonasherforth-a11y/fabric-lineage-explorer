@@ -179,6 +179,7 @@ class ReportPage:
     """A page in a report."""
     name: str
     display_name: str = ""
+    report_name: str = ""
     visuals: list = field(default_factory=list)  # [ReportVisual, ...]
     width: int = 0
     height: int = 0

@@ -39,6 +39,22 @@ Built on top of Microsoft Fabric Skills + REST APIs. Designed to be used inside 
 # Install dependencies
 pip install -r requirements.txt
 
+# Run the interactive explorer
+streamlit run app.py
+```
+
+In the sidebar, choose **Synced Repo Folder**, enter the local root of the synced repository or solution folder, then click **Scan Now**. The app scans recursively for `.SemanticModel` and `.Report` folders, so it can analyze an entire checked-out Fabric/Power BI repository.
+
+You can also prefill the folder from the URL query string:
+
+```text
+http://localhost:8501/?data_folder=C:\path\to\synced\repo
+```
+
+For live workspace metadata, use Fabric API mode:
+
+```bash
+
 # Run interactive lineage trace
 python lineage_tracker.py --workspace "Your Workspace Name"
 

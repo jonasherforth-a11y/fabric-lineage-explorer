@@ -101,7 +101,7 @@ class LineageEngine:
                         partition.source_expression, table.name, partition.name
                     )
                     for src in sources:
-                        src_id = f"source:{src.source_type}://{src.server or src.url or src.path or src.database}"
+                        src_id = f"source:{src.source_type}://{src.server or src.url or src.path}/{src.database}"
                         if src_id not in self.nodes:
                             self._add_node(GraphNode(
                                 id=src_id,
@@ -205,6 +205,7 @@ class LineageEngine:
                         detail={
                             "visual_type": visual.visual_type,
                             "page": page.display_name or page.name,
+                            "report": page.report_name or "",
                         }
                     ))
                     for field_type, tbl, fld in visual.fields:
@@ -317,7 +318,7 @@ class LineageEngine:
                     if p.get("source_expression"):
                         sources = extract_m_data_sources(p["source_expression"], table_name, p.get("name", ""))
                         for src in sources:
-                            src_id = f"source:{src.source_type}://{src.server or src.url or src.path or src.database}"
+                            src_id = f"source:{src.source_type}://{src.server or src.url or src.path}/{src.database}"
                             if src_id not in self.nodes:
                                 self._add_node(GraphNode(
                                     id=src_id,

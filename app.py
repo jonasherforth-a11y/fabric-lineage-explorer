@@ -1,5 +1,5 @@
 """
-Lineage Explorer — Interactive Streamlit UI
+Fabric Lineage Explorer — Interactive Streamlit UI
 
 Provides:
 - Dashboard overview (reports, models, sources, issues)
@@ -12,6 +12,7 @@ Provides:
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -35,7 +36,7 @@ from pbip_insights import (
 
 # ─── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Lineage Explorer",
+    page_title="Workspace / GIT Explorer",
     page_icon="🔗",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -67,15 +68,15 @@ st.markdown("""
 
 # ─── State & Data Loading ───────────────────────────────────────────────────────
 @st.cache_data
-def load_from_scan(solution_path: str) -> dict:
-    """Scan solution folder and build lineage."""
-    path = Path(solution_path)
+def load_from_scan(solution_path: str, _cache_bust: str = "") -> dict:
+    """Scan a user-selected synced repository folder and build lineage."""
+    path = Path(solution_path).expanduser().resolve()
     result = scan_solution_folder(path)
     lineage = build_lineage_map(result["models"], result["reports"])
     # Add raw model/report objects for detail views
     lineage["_models_raw"] = result["models"]
     lineage["_reports_raw"] = result["reports"]
-    lineage["_solution_path"] = solution_path
+    lineage["_solution_path"] = str(path)
     return lineage
 
 
@@ -83,6 +84,57 @@ def load_from_scan(solution_path: str) -> dict:
 def load_from_json(json_path: str) -> dict:
     """Load pre-generated lineage JSON."""
     return json.loads(Path(json_path).read_text(encoding="utf-8"))
+
+
+def _get_query_folder_path() -> str:
+    """Read a scan folder supplied by URL query parameter."""
+    for key in ("data_folder", "repo_path", "folder", "path"):
+        try:
+            value = st.query_params.get(key, "")
+        except AttributeError:
+            value = st.experimental_get_query_params().get(key, [""])
+        if isinstance(value, list):
+            value = value[0] if value else ""
+        if value:
+            return str(value)
+    return ""
+
+
+def _contains_pbip_artifacts(folder_path: Path) -> bool:
+    return any(folder_path.rglob("*.SemanticModel")) or any(folder_path.rglob("*.Report"))
+
+
+def _get_folder_fingerprint(folder_path: str) -> str:
+    """Get a hash based on modification times of key files in the scan folder."""
+    import hashlib
+    p = Path(folder_path)
+    if not p.exists():
+        return ""
+    mtimes = []
+    for ext in ("*.tmdl", "*.pbir", "*.json"):
+        for f in p.rglob(ext):
+            try:
+                mtimes.append(f"{f.relative_to(p)}:{f.stat().st_mtime}")
+            except OSError:
+                pass
+    return hashlib.md5("|".join(sorted(mtimes)).encode()).hexdigest()
+
+
+def validate_scan_folder(folder_path: str) -> tuple[Path | None, str | None]:
+    """Validate the selected local folder before scanning."""
+    cleaned = folder_path.strip().strip('"')
+    if not cleaned:
+        return None, "Choose a synced repository folder before scanning."
+
+    path = Path(cleaned).expanduser()
+    if not path.exists():
+        return None, f"Folder does not exist: {path}"
+    if not path.is_dir():
+        return None, f"Path is not a folder: {path}"
+    if not _contains_pbip_artifacts(path):
+        return None, "No .SemanticModel or .Report folders were found below this folder."
+
+    return path.resolve(), None
 
 
 def load_from_api(workspace_name: str) -> dict:
@@ -156,7 +208,8 @@ def load_from_api(workspace_name: str) -> dict:
 
         # Get semantic model if not cached
         if dataset_id and dataset_id not in model_cache:
-            model_info = {"name": "", "tables": [], "data_sources": [], "relationships": 0, "total_measures": 0, "path": ""}
+            model_info = {"name": "", "tables": [], "data_sources": [], "relationships": 0, "total_measures": 0, "path": "",
+                          "columns_detail": [], "measures_detail": [], "relationships_detail": [], "partitions_detail": {}}
             try:
                 ds_info = tracker.get_dataset_info(workspace_id, dataset_id)
                 model_info["name"] = ds_info.get("name", dataset_id)
@@ -173,6 +226,15 @@ def load_from_api(workspace_name: str) -> dict:
                     {"name": t.name, "columns": len(t.columns), "measures": 0, "is_hidden": t.is_hidden}
                     for t in tables
                 ]
+                # Store detailed column info for the engine
+                for t in tables:
+                    for col in t.columns:
+                        model_info["columns_detail"].append({
+                            "table": t.name,
+                            "name": col.name if hasattr(col, 'name') else col.get("name", ""),
+                            "dataType": col.data_type if hasattr(col, 'data_type') else col.get("dataType", ""),
+                            "isHidden": col.is_hidden if hasattr(col, 'is_hidden') else col.get("isHidden", False),
+                        })
             except Exception:
                 # Fallback: REST tables
                 try:
@@ -188,6 +250,10 @@ def load_from_api(workspace_name: str) -> dict:
             try:
                 measures = tracker.get_model_measures_via_dax(workspace_id, dataset_id)
                 model_info["total_measures"] = len(measures)
+                model_info["measures_detail"] = [
+                    {"name": m.name, "table": m.table, "expression": m.expression}
+                    for m in measures
+                ]
             except Exception:
                 pass
 
@@ -195,6 +261,11 @@ def load_from_api(workspace_name: str) -> dict:
             try:
                 rels = tracker.get_model_relationships_via_dax(workspace_id, dataset_id)
                 model_info["relationships"] = len(rels)
+                model_info["relationships_detail"] = [
+                    {"fromTable": r.from_table, "fromColumn": r.from_column,
+                     "toTable": r.to_table, "toColumn": r.to_column}
+                    for r in rels
+                ]
             except Exception:
                 pass
 
@@ -202,7 +273,12 @@ def load_from_api(workspace_name: str) -> dict:
             try:
                 partitions = tracker.get_partitions_via_dax(workspace_id, dataset_id)
                 for table_name, parts in partitions.items():
+                    model_info["partitions_detail"][table_name] = []
                     for p in parts:
+                        model_info["partitions_detail"][table_name].append({
+                            "name": p.name,
+                            "source_expression": p.source_expression,
+                        })
                         if p.source_expression:
                             from pbip_insights import extract_m_data_sources
                             sources = extract_m_data_sources(p.source_expression, table_name, p.name)
@@ -234,7 +310,8 @@ def load_from_api(workspace_name: str) -> dict:
     for ds in datasets_raw:
         dataset_id = ds.get("id", "")
         if dataset_id and dataset_id not in model_cache:
-            model_info = {"name": ds.get("name", dataset_id), "tables": [], "data_sources": [], "relationships": 0, "total_measures": 0, "path": ""}
+            model_info = {"name": ds.get("name", dataset_id), "tables": [], "data_sources": [], "relationships": 0, "total_measures": 0, "path": "",
+                          "columns_detail": [], "measures_detail": [], "relationships_detail": [], "partitions_detail": {}}
 
             # Try DAX queries for rich metadata
             try:
@@ -246,6 +323,14 @@ def load_from_api(workspace_name: str) -> dict:
                     {"name": t.name, "columns": len(t.columns), "measures": 0, "is_hidden": t.is_hidden}
                     for t in tables
                 ]
+                for t in tables:
+                    for col in t.columns:
+                        model_info["columns_detail"].append({
+                            "table": t.name,
+                            "name": col.name if hasattr(col, 'name') else col.get("name", ""),
+                            "dataType": col.data_type if hasattr(col, 'data_type') else col.get("dataType", ""),
+                            "isHidden": col.is_hidden if hasattr(col, 'is_hidden') else col.get("isHidden", False),
+                        })
             except Exception:
                 try:
                     rest_tables = tracker.get_dataset_tables(workspace_id, dataset_id)
@@ -260,6 +345,10 @@ def load_from_api(workspace_name: str) -> dict:
             try:
                 measures = tracker.get_model_measures_via_dax(workspace_id, dataset_id)
                 model_info["total_measures"] = len(measures)
+                model_info["measures_detail"] = [
+                    {"name": m.name, "table": m.table, "expression": m.expression}
+                    for m in measures
+                ]
             except Exception:
                 pass
 
@@ -267,6 +356,11 @@ def load_from_api(workspace_name: str) -> dict:
             try:
                 rels = tracker.get_model_relationships_via_dax(workspace_id, dataset_id)
                 model_info["relationships"] = len(rels)
+                model_info["relationships_detail"] = [
+                    {"fromTable": r.from_table, "fromColumn": r.from_column,
+                     "toTable": r.to_table, "toColumn": r.to_column}
+                    for r in rels
+                ]
             except Exception:
                 pass
 
@@ -274,7 +368,12 @@ def load_from_api(workspace_name: str) -> dict:
             try:
                 partitions = tracker.get_partitions_via_dax(workspace_id, dataset_id)
                 for table_name, parts in partitions.items():
+                    model_info["partitions_detail"][table_name] = []
                     for p in parts:
+                        model_info["partitions_detail"][table_name].append({
+                            "name": p.name,
+                            "source_expression": p.source_expression,
+                        })
                         if p.source_expression:
                             from pbip_insights import extract_m_data_sources
                             sources = extract_m_data_sources(p.source_expression, table_name, p.name)
@@ -331,39 +430,27 @@ def source_badge(source: str) -> str:
     return f'<span class="source-badge source-{cls}">{source}</span>'
 
 
-def _get(obj, key, default=None):
-    """Get attribute or dict key — handles both dataclass instances and dicts."""
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 # ─── Sidebar ────────────────────────────────────────────────────────────────────
-# Auto-detect if running on Streamlit Cloud (no local filesystem access)
 _DEMO_JSON = Path(__file__).parent / "data" / "demo_lineage.json"
-_IS_CLOUD = not Path(r"c:\Users").exists()  # Simple: Windows paths don't exist on Linux cloud
+_QUERY_FOLDER_PATH = _get_query_folder_path()
+if _QUERY_FOLDER_PATH and "data_folder_path" not in st.session_state:
+    st.session_state["data_folder_path"] = _QUERY_FOLDER_PATH
 
 with st.sidebar:
-    st.image(str(Path(__file__).parent / "assets" / "logo.png"), width=120)
-    st.title("Lineage Explorer")
+    st.markdown("<h1 style='text-align:center; font-size:3rem;'>🔗</h1>", unsafe_allow_html=True)
+    st.title("Fabric Lineage Explorer")
     st.markdown("---")
 
-    if _IS_CLOUD:
-        load_mode = st.radio("Data Source", ["Athene Lineage Overview", "Upload JSON", "Fabric API"], horizontal=True)
-    else:
-        load_mode = st.radio("Data Source", ["Local PBIP", "Upload JSON", "Fabric API"], horizontal=True)
+    load_mode = st.radio("Data Source", ["Synced Repo Folder", "Fabric API", "Load JSON"], horizontal=True)
 
-    scan_btn = False
-    if load_mode == "Local PBIP":
-        solution_path = st.text_input("Solution folder path", placeholder="e.g. C:/repos/my-project/solution")
+    if load_mode == "Synced Repo Folder":
+        solution_path = st.text_input(
+            "Synced repository folder",
+            key="data_folder_path",
+            placeholder=r"C:\path\to\synced\repo\or\solution",
+        )
+        st.caption("Scans recursively for .SemanticModel and .Report folders. You can also set ?data_folder=... in the URL.")
         scan_btn = st.button("🔍 Scan Now", type="primary", use_container_width=True)
-    elif load_mode == "Athene Lineage Overview":
-        st.caption("Pre-loaded lineage data from the Athene Power BI solution with 66 reports, 31 models, 267 tables.")
-        scan_btn = st.button("📊 Load Athene", type="primary", use_container_width=True)
-    elif load_mode == "Upload JSON":
-        uploaded_file = st.file_uploader("Upload lineage JSON", type=["json"], help="Upload a previously exported lineage JSON file")
-        if uploaded_file is not None:
-            scan_btn = True
     elif load_mode == "Fabric API":
         workspace_name = st.text_input("Workspace name", placeholder="e.g. My Workspace")
         st.caption("Uses Azure CLI auth (MSAL interactive login)")
@@ -380,48 +467,71 @@ with st.sidebar:
                     st.error(f"Auth failed: {e}")
         with col_scan:
             scan_btn = st.button("☁️ Connect & Scan", type="primary")
+    else:
+        default_json = str(_DEMO_JSON) if _DEMO_JSON.exists() else str(Path(__file__).parent / "lineage_output.json")
+        json_path = st.text_input("Lineage JSON path", value=default_json)
+        scan_btn = st.button("📂 Load", type="primary", use_container_width=True)
+
+    st.markdown("---")
+
+    # ─── Auto-Refresh ───────────────────────────────────────────────────────────
+    st.markdown("**Auto-Refresh**")
+    auto_refresh = st.toggle("Enable auto-refresh", value=False, key="auto_refresh_toggle")
+    if auto_refresh:
+        refresh_interval = st.select_slider(
+            "Interval",
+            options=[10, 30, 60, 120, 300],
+            value=60,
+            format_func=lambda x: f"{x}s" if x < 60 else f"{x // 60}m",
+            key="refresh_interval",
+        )
+        st.caption(f"Data refreshes every {refresh_interval}s")
+    else:
+        refresh_interval = None
 
     st.markdown("---")
     st.markdown("**Navigation**")
     page = st.radio(
         "View",
-        ["📊 Dashboard", "🔗 Lineage Graph", "🗺️ ERD Diagram", "🌊 Lineage Flow", "🎯 Impact Analysis",
-         "📐 Model Explorer", "🧬 Model Insights", "📑 Report Insights", "📋 Reports", "🧊 Models", "⚠️ Issues", "🔎 Search"],
+        ["📊 Dashboard", "🔗 Lineage Graph", "🌊 Lineage Flow", "🗺️ ERD Diagram", "🎯 Impact Analysis",
+         "📑 Report Insights", "📋 Reports", "🧬 Model Insights", "📐 Workspace Explorer", "🧊 Models", "⚠️ Issues", "🔎 Search"],
         label_visibility="collapsed",
     )
 
 # ─── Load Data ──────────────────────────────────────────────────────────────────
 lineage = None
 
-# Auto-load demo data on first visit if available
-if "lineage" not in st.session_state and _DEMO_JSON.exists():
-    lineage = load_from_json(str(_DEMO_JSON))
-    st.session_state["lineage"] = lineage
-
 if scan_btn:
-    if load_mode == "Local PBIP":
-        if not solution_path:
-            st.warning("Please enter a solution folder path.")
+    if load_mode == "Synced Repo Folder":
+        selected_path, validation_error = validate_scan_folder(solution_path)
+        if validation_error:
+            st.warning(validation_error)
+            st.session_state.pop("lineage", None)
+            st.session_state.pop("selected_scan_folder", None)
         else:
-            with st.spinner("Scanning PBIP artifacts..."):
-                lineage = load_from_scan(solution_path)
-    elif load_mode == "Athene Lineage Overview":
-        with st.spinner("Loading Athene lineage..."):
-            lineage = load_from_json(str(_DEMO_JSON))
-    elif load_mode == "Upload JSON":
-        with st.spinner("Loading uploaded JSON..."):
-            lineage = json.loads(uploaded_file.read().decode("utf-8"))
+            current_fp = _get_folder_fingerprint(str(selected_path))
+            load_from_scan.clear()
+            with st.spinner(f"Scanning PBIP artifacts in '{selected_path}'..."):
+                lineage = load_from_scan(str(selected_path), _cache_bust=current_fp)
+            st.session_state["selected_scan_folder"] = str(selected_path)
+            st.session_state["_folder_fingerprint"] = current_fp
     elif load_mode == "Fabric API":
         if not workspace_name:
             st.warning("Please enter a workspace name.")
         else:
             with st.spinner(f"Connecting to Fabric API — workspace '{workspace_name}'..."):
                 lineage = load_from_api(workspace_name)
+    else:
+        with st.spinner("Loading JSON..."):
+            lineage = load_from_json(json_path)
     if lineage:
         st.session_state["lineage"] = lineage
-        # Clear cached engine so it rebuilds with new data
-        if "lineage_engine" in st.session_state:
-            del st.session_state["lineage_engine"]
+        st.session_state["_last_refresh"] = time.time()
+        # Clear cached engines and render caches so they rebuild with new data
+        stale_prefixes = ("lineage_engine", "flow_html_", "flow_mermaid_", "flow_node_names_")
+        keys_to_remove = [k for k in st.session_state if k.startswith(stale_prefixes)]
+        for k in keys_to_remove:
+            del st.session_state[k]
 
 if "lineage" in st.session_state:
     lineage = st.session_state["lineage"]
@@ -430,79 +540,186 @@ if lineage is None:
     st.info("👈 Configure a data source in the sidebar and click Scan/Load to begin.")
     st.stop()
 
+# ─── Auto-Refresh Logic ────────────────────────────────────────────────────────
+if auto_refresh and refresh_interval and "lineage" in st.session_state:
+    @st.fragment(run_every=refresh_interval)
+    def _auto_refresh_data():
+        """Periodically check for data changes and refresh."""
+        import time as _time
+
+        last_refresh = st.session_state.get("_last_refresh", 0)
+        now = _time.time()
+
+        if now - last_refresh < refresh_interval - 1:
+            return
+
+        refreshed = False
+        if load_mode == "Synced Repo Folder":
+            # Check if files changed
+            scan_folder = st.session_state.get("selected_scan_folder", "")
+            current_fp = _get_folder_fingerprint(scan_folder) if scan_folder else ""
+            prev_fp = st.session_state.get("_folder_fingerprint", "")
+            if scan_folder and current_fp and current_fp != prev_fp:
+                load_from_scan.clear()
+                new_lineage = load_from_scan(scan_folder, _cache_bust=current_fp)
+                st.session_state["lineage"] = new_lineage
+                st.session_state["_folder_fingerprint"] = current_fp
+                refreshed = True
+        elif load_mode == "Fabric API" and workspace_name:
+            new_lineage = load_from_api(workspace_name)
+            if new_lineage:
+                st.session_state["lineage"] = new_lineage
+                refreshed = True
+
+        if refreshed:
+            st.session_state["_last_refresh"] = now
+            # Clear cached engines and render caches
+            stale_prefixes = ("lineage_engine", "flow_html_", "flow_mermaid_", "flow_node_names_")
+            keys_to_remove = [k for k in st.session_state if k.startswith(stale_prefixes)]
+            for k in keys_to_remove:
+                del st.session_state[k]
+            st.rerun()
+
+    _auto_refresh_data()
+
 
 # ─── Helper: Build engine from lineage data ─────────────────────────────────────
-def _build_engine_from_lineage(lineage_data: dict):
-    """Build a LineageEngine from current lineage state (local or API)."""
+def _build_engine_from_lineage(lineage_data: dict, model_name: str = None):
+    """Build a LineageEngine from current lineage state (local or API).
+    
+    Args:
+        lineage_data: Full lineage dict
+        model_name: If provided, filter to only this semantic model's data
+    """
     from lineage_engine import LineageEngine
     engine = LineageEngine()
 
     models_raw = lineage_data.get("_models_raw")
-    if models_raw and len(models_raw) > 0:
-        first = models_raw[0]
-        if hasattr(first, "tables") and not isinstance(first, dict):
-            # Local PBIP mode: models_raw are SemanticModelDef dataclass instances
-            all_tables = []
-            all_relationships = []
-            for model in models_raw:
-                all_tables.extend(model.tables)
-                all_relationships.extend(model.relationships)
-            engine.build_from_local(all_tables, all_relationships, [])
-        else:
-            # JSON mode: models_raw are dicts — convert to simple namespace objects
-            from types import SimpleNamespace
-            all_tables = []
-            all_relationships = []
-            for model in models_raw:
-                for t_dict in model.get("tables", []):
-                    table = SimpleNamespace(
-                        name=t_dict.get("name", ""),
-                        is_hidden=t_dict.get("is_hidden", False),
-                        columns=[SimpleNamespace(
-                            name=c.get("name", ""),
-                            data_type=c.get("data_type", ""),
-                            source_column=c.get("source_column", ""),
-                            is_hidden=c.get("is_hidden", False),
-                        ) for c in t_dict.get("columns", [])],
-                        measures=[SimpleNamespace(
-                            name=m.get("name", ""),
-                            expression=m.get("expression", ""),
-                            table=m.get("table", ""),
-                        ) for m in t_dict.get("measures", [])],
-                        partitions=[SimpleNamespace(
-                            name=p.get("name", ""),
-                            source_type=p.get("source_type", ""),
-                            source_expression=p.get("source_expression", ""),
-                            query_group=p.get("query_group", ""),
-                        ) for p in t_dict.get("partitions", [])],
-                        lineage_tag=t_dict.get("lineage_tag", ""),
-                        data_sources=t_dict.get("data_sources", []),
-                    )
-                    all_tables.append(table)
-                for r_dict in model.get("relationships", []):
-                    rel = SimpleNamespace(
-                        from_table=r_dict.get("from_table", ""),
-                        from_column=r_dict.get("from_column", ""),
-                        to_table=r_dict.get("to_table", ""),
-                        to_column=r_dict.get("to_column", ""),
-                        cross_filtering=r_dict.get("cross_filtering", ""),
-                        is_active=r_dict.get("is_active", True),
-                    )
-                    all_relationships.append(rel)
-            engine.build_from_local(all_tables, all_relationships, [])
+    # Detect if models_raw are dataclass instances (have .tables attribute) vs dicts
+    is_dataclass_mode = (
+        models_raw and len(models_raw) > 0
+        and hasattr(models_raw[0], "tables") and not isinstance(models_raw[0], dict)
+    )
+    if is_dataclass_mode:
+        # Synced repo mode: models_raw are SemanticModelDef dataclass instances
+        all_tables = []
+        all_relationships = []
+        for model in models_raw:
+            if model_name and model.name != model_name:
+                continue
+            all_tables.extend(model.tables)
+            all_relationships.extend(model.relationships)
+
+        # Parse report pages for visual field usage
+        all_pages = []
+        reports_raw = lineage_data.get("_reports_raw", [])
+        if reports_raw:
+            for report in reports_raw:
+                if hasattr(report, "path") and report.path:
+                    try:
+                        pages = parse_report_pages(Path(report.path))
+                        for pg in pages:
+                            pg.report_name = getattr(report, "name", "")
+                        all_pages.extend(pages)
+                    except Exception:
+                        pass
+
+        engine.build_from_local(all_tables, all_relationships, all_pages)
     else:
-        # Fallback: API mode with minimal data
-        engine.build_from_api([], [], [], {})
+        # API mode: build from dict data
+        tables_data = []
+        relationships_data = []
+        measures_data = []
+        partitions_data = {}
+
+        for model in lineage_data.get("models", []):
+            if model_name and model.get("name", "") != model_name:
+                continue
+
+            # Build tables with their column details
+            table_names_in_model = {t.get("name", "") for t in model.get("tables", [])}
+            for t in model.get("tables", []):
+                tbl_name = t.get("name", "")
+                # Gather columns for this table from columns_detail
+                tbl_columns = [
+                    c for c in model.get("columns_detail", [])
+                    if c.get("table") == tbl_name
+                ]
+                tables_data.append({
+                    "name": tbl_name,
+                    "columns": [{"name": c["name"], "dataType": c.get("dataType", ""), "isHidden": c.get("isHidden", False)} for c in tbl_columns],
+                    "isHidden": t.get("is_hidden", False),
+                })
+
+            # Relationships
+            for r in model.get("relationships_detail", []):
+                relationships_data.append(r)
+
+            # Measures
+            for m in model.get("measures_detail", []):
+                measures_data.append(m)
+
+            # Partitions
+            for tbl_name, parts in model.get("partitions_detail", {}).items():
+                partitions_data[tbl_name] = parts
+
+        engine.build_from_api(tables_data, relationships_data, measures_data, partitions_data)
+
+        # Parse report pages for visual field usage (from saved/dict data)
+        reports_raw = lineage_data.get("_reports_raw", [])
+        if reports_raw:
+            from lineage_engine import GraphNode, GraphEdge
+            for report in reports_raw:
+                report_path = report.get("path") if isinstance(report, dict) else getattr(report, "path", None)
+                report_name = report.get("name", "") if isinstance(report, dict) else getattr(report, "name", "")
+                if report_path:
+                    try:
+                        pages = parse_report_pages(Path(report_path))
+                        for page in pages:
+                            page.report_name = report_name
+                            for visual in page.visuals:
+                                visual_id = f"visual:{page.display_name or page.name}|{visual.name}"
+                                if visual_id not in engine.nodes:
+                                    engine._add_node(GraphNode(
+                                        id=visual_id,
+                                        type="visual",
+                                        name=visual.name,
+                                        detail={
+                                            "visual_type": visual.visual_type,
+                                            "page": page.display_name or page.name,
+                                            "report": page.report_name or "",
+                                        }
+                                    ))
+                                for field_type, tbl, fld in visual.fields:
+                                    if field_type == "Measure":
+                                        target_id = f"measure:{tbl}.{fld}"
+                                    elif field_type == "Column":
+                                        target_id = f"column:{tbl}.{fld}"
+                                    else:
+                                        target_id = f"table:{tbl}"
+                                    engine._add_edge(GraphEdge(visual_id, target_id, "uses_field"))
+                    except Exception:
+                        pass
 
     return engine
 
 
-def _get_or_build_engine(lineage_data: dict):
-    """Cache the engine in session state."""
-    if "lineage_engine" not in st.session_state:
-        with st.spinner("Building lineage engine (first load)..."):
-            st.session_state["lineage_engine"] = _build_engine_from_lineage(lineage_data)
-    return st.session_state["lineage_engine"]
+def _get_or_build_engine(lineage_data: dict, model_name: str = None):
+    """Cache the engine in session state. Rebuilds if model selection changes."""
+    cache_key = f"lineage_engine_v3_{model_name or '_all_'}"
+    if cache_key not in st.session_state:
+        # Clear any old-version engine keys
+        old_keys = [k for k in st.session_state if k.startswith("lineage_engine") and k != cache_key]
+        for k in old_keys:
+            del st.session_state[k]
+        with st.spinner("Building lineage engine..."):
+            st.session_state[cache_key] = _build_engine_from_lineage(lineage_data, model_name)
+            # Clear stale render caches that depend on engine data
+            stale_prefixes = ("flow_html_", "flow_mermaid_", "flow_node_names_")
+            for k in list(st.session_state.keys()):
+                if k.startswith(stale_prefixes):
+                    del st.session_state[k]
+    return st.session_state[cache_key]
 
 
 # ─── Dashboard ──────────────────────────────────────────────────────────────────
@@ -997,11 +1214,15 @@ elif page == "🌊 Lineage Flow":
 
     max_nodes = st.slider("Max nodes to display", 10, 500, 150, key="flow_max_nodes")
 
-    # Focus node selector — only show nodes of visible types
-    filtered_node_names = sorted([
-        f"{n.type}: {n.name}" for n in engine.nodes.values()
-        if n.type in visible_types
-    ])
+    # Focus node selector — only show nodes of visible types (cached)
+    visible_types_key = frozenset(visible_types)
+    cache_names_key = f"flow_node_names_{visible_types_key}"
+    if cache_names_key not in st.session_state:
+        st.session_state[cache_names_key] = sorted([
+            f"{n.type}: {n.name}" for n in engine.nodes.values()
+            if n.type in visible_types
+        ])
+    filtered_node_names = st.session_state[cache_names_key]
     focus_selection = st.selectbox("Focus on node (optional)", ["(show all)"] + filtered_node_names)
 
     focus_id = None
@@ -1015,15 +1236,26 @@ elif page == "🌊 Lineage Flow":
         from diagram_renderer import generate_pyvis_html
         import streamlit.components.v1 as components
 
-        html = generate_pyvis_html(engine, focus_node=focus_id, height="650px",
-                                   visible_types=visible_types, max_nodes=max_nodes)
+        # Cache HTML to avoid regeneration on unrelated widget interactions
+        html_cache_key = f"flow_html_{focus_id}_{frozenset(visible_types)}_{max_nodes}"
+        if html_cache_key not in st.session_state:
+            with st.spinner("Rendering graph..."):
+                st.session_state[html_cache_key] = generate_pyvis_html(
+                    engine, focus_node=focus_id, height="650px",
+                    visible_types=visible_types, max_nodes=max_nodes)
+        html = st.session_state[html_cache_key]
         components.html(html, height=700, scrolling=True)
     else:
         from diagram_renderer import generate_lineage_mermaid
         import streamlit.components.v1 as components
 
-        mermaid_code = generate_lineage_mermaid(engine, focus_node=focus_id,
-                                                visible_types=visible_types, max_nodes=max_nodes)
+        # Cache Mermaid code
+        mermaid_cache_key = f"flow_mermaid_{focus_id}_{frozenset(visible_types)}_{max_nodes}"
+        if mermaid_cache_key not in st.session_state:
+            st.session_state[mermaid_cache_key] = generate_lineage_mermaid(
+                engine, focus_node=focus_id,
+                visible_types=visible_types, max_nodes=max_nodes)
+        mermaid_code = st.session_state[mermaid_cache_key]
         mermaid_html = f"""
         <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
         <div class="mermaid" style="background: white; padding: 20px; border-radius: 8px; overflow-x: auto;">
@@ -1035,6 +1267,65 @@ elif page == "🌊 Lineage Flow":
 
         with st.expander("📋 Mermaid Source"):
             st.code(mermaid_code, language="mermaid")
+
+    # ─── Report Usage Table ─────────────────────────────────────────────────
+    st.markdown("---")
+    with st.expander("📋 Report Usage — Where are tables and columns used?", expanded=False):
+        # Build reverse lookup: visual → tables/columns
+        usage_rows = []
+        for edge in engine.edges:
+            if edge.type == "uses_field" and edge.from_id.startswith("visual:"):
+                visual_node = engine.nodes.get(edge.from_id)
+                target_node = engine.nodes.get(edge.to_id)
+                if visual_node and target_node:
+                    report = visual_node.detail.get("report", "")
+                    page = visual_node.detail.get("page", "")
+                    visual_name = visual_node.name
+                    visual_type = visual_node.detail.get("visual_type", "")
+                    target_type = target_node.type.capitalize()
+                    target_name = f"{target_node.table}.{target_node.name}" if target_node.table else target_node.name
+                    usage_rows.append({
+                        "Report": report,
+                        "Page": page,
+                        "Visual": visual_name or f"({visual_type})",
+                        "Visual Type": visual_type,
+                        "Used Object": target_name,
+                        "Object Type": target_type,
+                    })
+
+        if usage_rows:
+            import pandas as pd
+            df_usage = pd.DataFrame(usage_rows)
+
+            # Filter by object type
+            available_types = sorted(df_usage["Object Type"].unique())
+            default_types = [t for t in ["Table", "Column"] if t in available_types]
+            obj_filter = st.multiselect(
+                "Filter by object type",
+                options=available_types,
+                default=default_types or available_types,
+                key="flow_usage_obj_filter"
+            )
+            if obj_filter:
+                df_usage = df_usage[df_usage["Object Type"].isin(obj_filter)]
+
+            # Search filter — searches across Used Object, Report, Page, and Visual columns
+            search = st.text_input("Search table/column name", key="flow_usage_search")
+            if search:
+                # Normalize search: treat dots and spaces interchangeably
+                search_pattern = search.replace(".", " ")
+                mask = (
+                    df_usage["Used Object"].str.replace(".", " ", regex=False).str.contains(search_pattern, case=False, na=False) |
+                    df_usage["Report"].str.contains(search, case=False, na=False) |
+                    df_usage["Page"].str.contains(search, case=False, na=False) |
+                    df_usage["Visual"].str.contains(search, case=False, na=False)
+                )
+                df_usage = df_usage[mask]
+
+            st.dataframe(df_usage, use_container_width=True, hide_index=True)
+            st.caption(f"Showing {len(df_usage)} field usage(s) across report visuals.")
+        else:
+            st.info("No visual field usage data found. Make sure report pages are scanned.")
 
 
 # ─── Impact Analysis ────────────────────────────────────────────────────────────
@@ -1132,13 +1423,30 @@ elif page == "🎯 Impact Analysis":
         st.info("Select an object above to see its impact.")
 
 
-# ─── Model Explorer ─────────────────────────────────────────────────────────────
-elif page == "📐 Model Explorer":
-    st.header("📐 Model Explorer — Tables & Columns")
+# ─── Workspace Explorer ─────────────────────────────────────────────────────────
+elif page == "📐 Workspace Explorer":
+    st.header("📐 Workspace Explorer — Tables & Columns")
     st.caption("Deep-dive into table structure, column usage, and measure catalog.")
 
+    # Semantic model selector
+    all_model_names = sorted([m["name"] for m in lineage["models"]])
+    if len(all_model_names) > 1:
+        selected_model_name = st.selectbox(
+            "🧊 Select Semantic Model",
+            ["(all models)"] + all_model_names,
+            index=1 if len(all_model_names) == 1 else 0,
+            key="explorer_model_select",
+        )
+        filter_model = None if selected_model_name == "(all models)" else selected_model_name
+    elif len(all_model_names) == 1:
+        selected_model_name = all_model_names[0]
+        st.info(f"Showing model: **{selected_model_name}**")
+        filter_model = selected_model_name
+    else:
+        filter_model = None
+
     try:
-        engine = _get_or_build_engine(lineage)
+        engine = _get_or_build_engine(lineage, model_name=filter_model)
     except Exception as e:
         st.error(f"Failed to build engine: {e}")
         import traceback
@@ -1293,29 +1601,18 @@ elif page == "🧬 Model Insights":
 
     if lineage and lineage.get("_models_raw"):
         models_raw = lineage["_models_raw"]
-        engine = _get_or_build_engine(lineage)
-        model_names = [_get(m, "name", "") for m in models_raw]
+        model_names = [m.name for m in models_raw]
         selected_model_name = st.selectbox("Select Semantic Model", model_names)
-        selected_model = next((m for m in models_raw if _get(m, "name") == selected_model_name), None)
+        selected_model = next((m for m in models_raw if m.name == selected_model_name), None)
 
         if selected_model:
-            model_path = _get(selected_model, "path", "")
+            # Run enhanced scan
+            @st.cache_data
+            def _enhanced_model_scan(path_str):
+                return scan_semantic_model_enhanced(Path(path_str))
 
-            # Run enhanced scan only if path is valid (local mode)
-            enhanced = None
-            if model_path and Path(str(model_path)).exists():
-                @st.cache_data
-                def _enhanced_model_scan(path_str):
-                    return scan_semantic_model_enhanced(Path(path_str))
-                enhanced = _enhanced_model_scan(str(model_path))
-
-            # Build dep_graph from enhanced scan or from engine
-            dep_graph = enhanced.get("measure_dependencies", {}) if enhanced else {}
-            if not dep_graph:
-                dep_graph = engine.dep_graph
-                # Filter to measures belonging to this model's tables
-                model_tables = {_get(t, "name") for t in _get(selected_model, "tables", [])}
-                dep_graph = {k: v for k, v in dep_graph.items() if v.get("table") in model_tables}
+            enhanced = _enhanced_model_scan(str(selected_model.path))
+            dep_graph = enhanced.get("measure_dependencies", {})
 
             tab1, tab2, tab3, tab4 = st.tabs(["📐 DAX Dependencies", "🗄️ Data Sources", "🔐 Roles (RLS)", "📖 Expressions"])
 
@@ -1380,7 +1677,7 @@ elif page == "🧬 Model Insights":
             # --- Data Sources Tab ---
             with tab2:
                 st.subheader("Data Sources (Comprehensive)")
-                data_sources = enhanced.get("data_sources", []) if enhanced else []
+                data_sources = enhanced.get("data_sources", [])
                 if data_sources:
                     # Group by type
                     by_type = {}
@@ -1400,7 +1697,7 @@ elif page == "🧬 Model Insights":
             # --- Roles Tab ---
             with tab3:
                 st.subheader("Row-Level Security Roles")
-                roles = enhanced.get("roles", []) if enhanced else []
+                roles = enhanced.get("roles", [])
                 if roles:
                     for role in roles:
                         with st.expander(f"🔐 {role.name} ({len(role.table_permissions)} table permissions)"):
@@ -1415,7 +1712,7 @@ elif page == "🧬 Model Insights":
             # --- Expressions Tab ---
             with tab4:
                 st.subheader("Named Expressions & Parameters")
-                expressions = enhanced.get("expressions", []) if enhanced else []
+                expressions = enhanced.get("expressions", [])
                 if expressions:
                     params = [e for e in expressions if e.is_parameter]
                     queries = [e for e in expressions if not e.is_parameter]
@@ -1438,7 +1735,7 @@ elif page == "🧬 Model Insights":
             # Enhanced relationships
             st.markdown("---")
             st.subheader("Relationships")
-            rels = enhanced.get("relationships", []) if enhanced else []
+            rels = enhanced.get("relationships", [])
             if rels:
                 rel_data = []
                 for r in rels:
@@ -1454,26 +1751,7 @@ elif page == "🧬 Model Insights":
                     })
                 st.dataframe(rel_data, use_container_width=True)
             else:
-                # Fallback: show relationships from dict-based _models_raw
-                model_rels = _get(selected_model, "relationships", [])
-                if model_rels:
-                    rel_data = []
-                    for r in model_rels:
-                        r_from_table = _get(r, "from_table", "")
-                        r_from_col = _get(r, "from_column", "")
-                        r_to_table = _get(r, "to_table", "")
-                        r_to_col = _get(r, "to_column", "")
-                        cross = _get(r, "cross_filtering", "")
-                        active = "✓" if _get(r, "is_active", True) else "✗"
-                        rel_data.append({
-                            "From": f"{r_from_table}[{r_from_col}]",
-                            "To": f"{r_to_table}[{r_to_col}]",
-                            "Filter": cross,
-                            "Active": active,
-                        })
-                    st.dataframe(rel_data, use_container_width=True)
-                else:
-                    st.info("No relationships found.")
+                st.info("No relationships found.")
     else:
         st.warning("No data loaded. Use the sidebar to scan or load lineage data.")
 
@@ -1484,107 +1762,100 @@ elif page == "📑 Report Insights":
 
     if lineage and lineage.get("_reports_raw"):
         reports_raw = lineage["_reports_raw"]
-        report_names = [_get(r, "name", "") for r in reports_raw]
+        report_names = [r.name for r in reports_raw]
         selected_report_name = st.selectbox("Select Report", report_names)
-        selected_report = next((r for r in reports_raw if _get(r, "name") == selected_report_name), None)
+        selected_report = next((r for r in reports_raw if r.name == selected_report_name), None)
 
         if selected_report:
-            report_path = _get(selected_report, "path", "")
+            @st.cache_data
+            def _enhanced_report_scan(path_str):
+                return scan_report_enhanced(Path(path_str))
 
-            # Run enhanced scan only if path is valid (local mode)
-            enhanced_rpt = None
-            if report_path and Path(str(report_path)).exists():
-                @st.cache_data
-                def _enhanced_report_scan(path_str):
-                    return scan_report_enhanced(Path(path_str))
-                enhanced_rpt = _enhanced_report_scan(str(report_path))
+            enhanced_rpt = _enhanced_report_scan(str(selected_report.path))
 
-            if enhanced_rpt:
-                # Summary metrics
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Pages", enhanced_rpt.get("page_count", 0))
-                c2.metric("Visuals", enhanced_rpt.get("visual_count", 0))
-                c3.metric("Unique Fields Used", len(enhanced_rpt.get("field_usage_map", {})))
+            # Summary metrics
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Pages", enhanced_rpt.get("page_count", 0))
+            c2.metric("Visuals", enhanced_rpt.get("visual_count", 0))
+            c3.metric("Unique Fields Used", len(enhanced_rpt.get("field_usage_map", {})))
 
-                tab1, tab2, tab3 = st.tabs(["📄 Pages & Visuals", "📊 Field Usage", "🔍 Unused Fields"])
+            tab1, tab2, tab3 = st.tabs(["📄 Pages & Visuals", "📊 Field Usage", "🔍 Unused Fields"])
 
-                # --- Pages & Visuals Tab ---
-                with tab1:
-                    pages = enhanced_rpt.get("pages", [])
-                    for pg in pages:
-                        with st.expander(f"📄 {pg.display_name or pg.name} ({len(pg.visuals)} visuals)"):
-                            if pg.visuals:
-                                visual_types = {}
-                                for v in pg.visuals:
-                                    visual_types[v.visual_type] = visual_types.get(v.visual_type, 0) + 1
+            # --- Pages & Visuals Tab ---
+            with tab1:
+                pages = enhanced_rpt.get("pages", [])
+                for pg in pages:
+                    with st.expander(f"📄 {pg.display_name or pg.name} ({len(pg.visuals)} visuals)"):
+                        if pg.visuals:
+                            visual_types = {}
+                            for v in pg.visuals:
+                                visual_types[v.visual_type] = visual_types.get(v.visual_type, 0) + 1
 
-                                st.markdown("**Visual types:** " + ", ".join(f"{t} ({c})" for t, c in sorted(visual_types.items())))
-                                st.markdown("---")
-                                for v in pg.visuals:
-                                    fields_str = ", ".join(f"`{f[1]}.{f[2]}`" for f in v.fields[:5])
-                                    more = f" +{len(v.fields)-5} more" if len(v.fields) > 5 else ""
-                                    st.markdown(f"  - **{v.name}** ({v.visual_type}): {fields_str}{more}")
-                            else:
-                                st.info("No visuals on this page.")
-
-                # --- Field Usage Tab ---
-                with tab2:
-                    st.subheader("Field Usage Across Visuals")
-                    usage_map = enhanced_rpt.get("field_usage_map", {})
-                    if usage_map:
-                        # Sort by most used
-                        sorted_fields = sorted(usage_map.items(), key=lambda x: len(x[1]), reverse=True)
-                        usage_data = []
-                        for key, usages in sorted_fields[:50]:
-                            parts = key.split("|")
-                            field_type, table, field_name = parts[0], parts[1], parts[2]
-                            visual_names = list(set(u.visual_name for u in usages))
-                            usage_data.append({
-                                "Type": field_type,
-                                "Table": table,
-                                "Field": field_name,
-                                "Used In": len(usages),
-                                "Visuals": ", ".join(visual_names[:3]) + ("..." if len(visual_names) > 3 else ""),
-                            })
-                        st.dataframe(usage_data, use_container_width=True)
-                    else:
-                        st.info("No field usage data extracted.")
-
-                # --- Unused Fields Tab ---
-                with tab3:
-                    st.subheader("Potentially Unused Fields")
-                    st.markdown("*Fields in the semantic model NOT referenced by any visual in this report.*")
-
-                    # Get model fields from linked model
-                    model_name = enhanced_rpt.get("semantic_model_name", "")
-                    usage_map = enhanced_rpt.get("field_usage_map", {})
-                    used_fields = set()
-                    for key in usage_map:
-                        parts = key.split("|")
-                        used_fields.add((parts[1], parts[2]))
-
-                    # Find the model
-                    if lineage.get("_models_raw"):
-                        linked_model = next((m for m in lineage["_models_raw"] if _get(m, "name") == model_name), None)
-                        if linked_model:
-                            unused = []
-                            for table in _get(linked_model, "tables", []):
-                                if _get(table, "is_hidden", False):
-                                    continue
-                                for col in _get(table, "columns", []):
-                                    if not _get(col, "is_hidden", False) and (_get(table, "name"), _get(col, "name")) not in used_fields:
-                                        unused.append({"Table": _get(table, "name"), "Column": _get(col, "name")})
-                            if unused:
-                                st.dataframe(unused[:100], use_container_width=True)
-                                st.caption(f"Showing {min(len(unused), 100)} of {len(unused)} unused fields")
-                            else:
-                                st.success("All visible fields are used!")
+                            st.markdown("**Visual types:** " + ", ".join(f"{t} ({c})" for t, c in sorted(visual_types.items())))
+                            st.markdown("---")
+                            for v in pg.visuals:
+                                fields_str = ", ".join(f"`{f[1]}.{f[2]}`" for f in v.fields[:5])
+                                more = f" +{len(v.fields)-5} more" if len(v.fields) > 5 else ""
+                                st.markdown(f"  - **{v.name}** ({v.visual_type}): {fields_str}{more}")
                         else:
-                            st.info(f"Linked model '{model_name}' not found in scan.")
+                            st.info("No visuals on this page.")
+
+            # --- Field Usage Tab ---
+            with tab2:
+                st.subheader("Field Usage Across Visuals")
+                usage_map = enhanced_rpt.get("field_usage_map", {})
+                if usage_map:
+                    # Sort by most used
+                    sorted_fields = sorted(usage_map.items(), key=lambda x: len(x[1]), reverse=True)
+                    usage_data = []
+                    for key, usages in sorted_fields[:50]:
+                        parts = key.split("|")
+                        field_type, table, field_name = parts[0], parts[1], parts[2]
+                        visual_names = list(set(u.visual_name for u in usages))
+                        usage_data.append({
+                            "Type": field_type,
+                            "Table": table,
+                            "Field": field_name,
+                            "Used In": len(usages),
+                            "Visuals": ", ".join(visual_names[:3]) + ("..." if len(visual_names) > 3 else ""),
+                        })
+                    st.dataframe(usage_data, use_container_width=True)
+                else:
+                    st.info("No field usage data extracted.")
+
+            # --- Unused Fields Tab ---
+            with tab3:
+                st.subheader("Potentially Unused Fields")
+                st.markdown("*Fields in the semantic model NOT referenced by any visual in this report.*")
+
+                # Get model fields from linked model
+                model_name = enhanced_rpt.get("semantic_model_name", "")
+                usage_map = enhanced_rpt.get("field_usage_map", {})
+                used_fields = set()
+                for key in usage_map:
+                    parts = key.split("|")
+                    used_fields.add((parts[1], parts[2]))
+
+                # Find the model
+                if lineage.get("_models_raw"):
+                    linked_model = next((m for m in lineage["_models_raw"] if m.name == model_name), None)
+                    if linked_model:
+                        unused = []
+                        for table in linked_model.tables:
+                            if table.is_hidden:
+                                continue
+                            for col in table.columns:
+                                if not col.is_hidden and (table.name, col.name) not in used_fields:
+                                    unused.append({"Table": table.name, "Column": col.name})
+                        if unused:
+                            st.dataframe(unused[:100], use_container_width=True)
+                            st.caption(f"Showing {min(len(unused), 100)} of {len(unused)} unused fields")
+                        else:
+                            st.success("All visible fields are used!")
                     else:
-                        st.info("No model data available for cross-reference.")
-            else:
-                st.info("Report Insights requires local PBIP access to scan report pages and visuals. This feature is not available in cloud/JSON mode.")
+                        st.info(f"Linked model '{model_name}' not found in scan.")
+                else:
+                    st.info("No model data available for cross-reference.")
     else:
         st.warning("No data loaded. Use the sidebar to scan or load lineage data.")
 
@@ -1881,12 +2152,3 @@ elif page == "🔎 Search":
             for i in results["issues"]:
                 icon = "❌" if i["severity"] == "error" else "⚠️"
                 st.markdown(f"- {icon} **{i['type']}**: {i['message']}")
-
-# ─── Footer ─────────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown(
-    "<div style='text-align:center; color:#888; font-size:0.85rem; padding:1rem 0;'>"
-    "Built by <strong>Jonas Herforth</strong> · twoday"
-    "</div>",
-    unsafe_allow_html=True,
-)

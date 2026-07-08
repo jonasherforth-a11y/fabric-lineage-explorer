@@ -303,6 +303,38 @@ def generate_pyvis_html(engine: LineageEngine, focus_node: str = None,
         "visual": "star",
     }
 
+    # Build reverse lookup: which visuals use each table/column/measure
+    # Only build for nodes that will actually be displayed
+    _visual_usage: dict[str, list[str]] = {}  # node_id → list of "Page | Visual (type)"
+    for edge in engine.edges:
+        if edge.type == "uses_field" and edge.from_id.startswith("visual:"):
+            if edge.to_id not in node_ids and not any(
+                edge.to_id.startswith("column:") and f"table:{edge.to_id.replace('column:', '').split('.', 1)[0]}" in node_ids
+                for _ in [None]
+            ):
+                continue
+            visual_node = engine.nodes.get(edge.from_id)
+            if visual_node:
+                page = visual_node.detail.get("page", "")
+                vtype = visual_node.detail.get("visual_type", "")
+                display = f"{page} → {visual_node.name}" if visual_node.name else f"{page} ({vtype})"
+                if edge.to_id in node_ids:
+                    _visual_usage.setdefault(edge.to_id, []).append(display)
+                # Also propagate to the parent table for columns
+                if edge.to_id.startswith("column:"):
+                    parts = edge.to_id.replace("column:", "").split(".", 1)
+                    if len(parts) == 2:
+                        table_id = f"table:{parts[0]}"
+                        if table_id in node_ids:
+                            _visual_usage.setdefault(table_id, []).append(display)
+
+    # Also propagate measure usage up to the columns/tables they reference (only for visible nodes)
+    for edge in engine.edges:
+        if edge.type in ("references_column", "references_table", "depends_on_measure"):
+            if edge.from_id in _visual_usage and edge.to_id in node_ids:
+                for vis_label in _visual_usage[edge.from_id]:
+                    _visual_usage.setdefault(edge.to_id, []).append(vis_label)
+
     for node_id in node_ids:
         node = engine.nodes.get(node_id)
         if not node:
@@ -312,10 +344,23 @@ def generate_pyvis_html(engine: LineageEngine, focus_node: str = None,
         label = node.name if len(node.name) <= 25 else node.name[:22] + "..."
         is_focus = node_id == focus_node
 
+        # Build tooltip with report/visual usage info
+        tooltip = f"{node.type}: {node.name}"
+        if node.table:
+            tooltip += f"\nTable: {node.table}"
+        usage_list = _visual_usage.get(node_id, [])
+        if usage_list:
+            unique_usage = sorted(set(usage_list))
+            tooltip += f"\n\nUsed in {len(unique_usage)} visual(s):"
+            for u in unique_usage[:15]:
+                tooltip += f"\n  • {u}"
+            if len(unique_usage) > 15:
+                tooltip += f"\n  ... and {len(unique_usage) - 15} more"
+
         vis_nodes.append({
             "id": node_id,
             "label": label,
-            "title": f"{node.type}: {node.name}" + (f"\nTable: {node.table}" if node.table else ""),
+            "title": tooltip,
             "color": colors,
             "shape": shape,
             "size": 30 if is_focus else 20,
@@ -364,9 +409,15 @@ var edges = new vis.DataSet({edges_json});
 var container = document.getElementById('network');
 var data = {{ nodes: nodes, edges: edges }};
 var options = {{
-    physics: {{ solver: 'forceAtlas2Based', forceAtlas2Based: {{ gravitationalConstant: -50, springLength: 120 }} }},
+    physics: {{
+        solver: 'forceAtlas2Based',
+        forceAtlas2Based: {{ gravitationalConstant: -50, springLength: 120, damping: 0.8 }},
+        stabilization: {{ enabled: true, iterations: 150, fit: true }},
+        maxVelocity: 50,
+        minVelocity: 0.75
+    }},
     interaction: {{ hover: true, tooltipDelay: 100 }},
-    layout: {{ improvedLayout: true }},
+    layout: {{ improvedLayout: false }},
     groups: {{
         dataSource: {{ color: {{background:'#4caf50',border:'#2e7d32'}} }},
         table: {{ color: {{background:'#1565c0',border:'#0d47a1'}} }},
@@ -376,6 +427,9 @@ var options = {{
     }}
 }};
 var network = new vis.Network(container, data, options);
+network.once('stabilizationIterationsDone', function() {{
+    network.setOptions({{ physics: {{ enabled: false }} }});
+}});
 </script>
 </body></html>"""
     return html
