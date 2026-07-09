@@ -223,7 +223,7 @@ def load_from_api(workspace_name: str) -> dict:
                 for t in tables:
                     t.columns = columns.get(t.name, [])
                 model_info["tables"] = [
-                    {"name": t.name, "columns": len(t.columns), "measures": 0, "is_hidden": t.is_hidden}
+                    {"name": t.name, "columns": len(t.columns), "measures": 0, "is_hidden": t.is_hidden, "partitions": []}
                     for t in tables
                 ]
                 # Store detailed column info for the engine
@@ -240,7 +240,7 @@ def load_from_api(workspace_name: str) -> dict:
                 try:
                     rest_tables = tracker.get_dataset_tables(workspace_id, dataset_id)
                     model_info["tables"] = [
-                        {"name": t.get("name", ""), "columns": 0, "measures": 0, "is_hidden": False}
+                        {"name": t.get("name", ""), "columns": 0, "measures": 0, "is_hidden": False, "partitions": []}
                         for t in rest_tables
                     ]
                 except Exception:
@@ -272,6 +272,7 @@ def load_from_api(workspace_name: str) -> dict:
             # Get data sources from partitions
             try:
                 partitions = tracker.get_partitions_via_dax(workspace_id, dataset_id)
+                _table_by_name = {t["name"]: t for t in model_info["tables"]}
                 for table_name, parts in partitions.items():
                     model_info["partitions_detail"][table_name] = []
                     for p in parts:
@@ -279,6 +280,14 @@ def load_from_api(workspace_name: str) -> dict:
                             "name": p.name,
                             "source_expression": p.source_expression,
                         })
+                        # Normalize onto the table dict so partition search works uniformly
+                        table_dict = _table_by_name.get(table_name)
+                        if table_dict is not None:
+                            table_dict.setdefault("partitions", []).append({
+                                "name": p.name,
+                                "type": getattr(p, "source_type", "m"),
+                                "source": p.source_expression,
+                            })
                         if p.source_expression:
                             from pbip_insights import extract_m_data_sources
                             sources = extract_m_data_sources(p.source_expression, table_name, p.name)
@@ -320,7 +329,7 @@ def load_from_api(workspace_name: str) -> dict:
                 for t in tables:
                     t.columns = columns.get(t.name, [])
                 model_info["tables"] = [
-                    {"name": t.name, "columns": len(t.columns), "measures": 0, "is_hidden": t.is_hidden}
+                    {"name": t.name, "columns": len(t.columns), "measures": 0, "is_hidden": t.is_hidden, "partitions": []}
                     for t in tables
                 ]
                 for t in tables:
@@ -335,7 +344,7 @@ def load_from_api(workspace_name: str) -> dict:
                 try:
                     rest_tables = tracker.get_dataset_tables(workspace_id, dataset_id)
                     model_info["tables"] = [
-                        {"name": t.get("name", ""), "columns": 0, "measures": 0, "is_hidden": False}
+                        {"name": t.get("name", ""), "columns": 0, "measures": 0, "is_hidden": False, "partitions": []}
                         for t in rest_tables
                     ]
                 except Exception:
@@ -367,6 +376,7 @@ def load_from_api(workspace_name: str) -> dict:
             # Get data sources from partitions
             try:
                 partitions = tracker.get_partitions_via_dax(workspace_id, dataset_id)
+                _table_by_name = {t["name"]: t for t in model_info["tables"]}
                 for table_name, parts in partitions.items():
                     model_info["partitions_detail"][table_name] = []
                     for p in parts:
@@ -374,6 +384,14 @@ def load_from_api(workspace_name: str) -> dict:
                             "name": p.name,
                             "source_expression": p.source_expression,
                         })
+                        # Normalize onto the table dict so partition search works uniformly
+                        table_dict = _table_by_name.get(table_name)
+                        if table_dict is not None:
+                            table_dict.setdefault("partitions", []).append({
+                                "name": p.name,
+                                "type": getattr(p, "source_type", "m"),
+                                "source": p.source_expression,
+                            })
                         if p.source_expression:
                             from pbip_insights import extract_m_data_sources
                             sources = extract_m_data_sources(p.source_expression, table_name, p.name)
@@ -1461,7 +1479,7 @@ elif page == "📐 Workspace Explorer":
         get_data_source_inventory,
     )
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Table Inventory", "📏 Column Explorer", "📐 Measure Catalog", "🗄️ Data Sources"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Table Inventory", "📏 Column Explorer", "📐 Measure Catalog", "🗄️ Data Sources", "🧩 Partitions"])
 
     with tab1:
         inventory = get_table_inventory(engine)
@@ -1584,6 +1602,60 @@ elif page == "📐 Workspace Explorer":
                     st.markdown("**Consuming tables:** " + ", ".join(f"`{t}`" for t in ds["tables"]))
         else:
             st.info("No data sources detected in partition expressions.")
+
+    with tab5:
+        st.caption("Search partition names, types, and source expressions (M / DAX) across the model.")
+        part_query = st.text_input(
+            "Search partitions",
+            placeholder="e.g. partition name, table, SQL03, Source =, dbo...",
+            key="explorer_partition_search",
+        )
+
+        # Build partition inventory from the scanned lineage, respecting model filter
+        partition_rows = []
+        for m in lineage["models"]:
+            if filter_model and m["name"] != filter_model:
+                continue
+            for t in m.get("tables", []):
+                for p in t.get("partitions", []):
+                    partition_rows.append({"partition": p, "table": t["name"], "model": m["name"]})
+
+        if part_query:
+            pq = part_query.lower()
+            partition_rows = [
+                row for row in partition_rows
+                if pq in str(row["partition"].get("name", "")).lower()
+                or pq in str(row["partition"].get("type", "")).lower()
+                or pq in str(row["partition"].get("source", "")).lower()
+                or pq in row["table"].lower()
+            ]
+
+        if partition_rows:
+            st.caption(f"{len(partition_rows)} partition(s)")
+            summary_rows = [
+                {
+                    "Model": row["model"],
+                    "Table": row["table"],
+                    "Partition": row["partition"].get("name", ""),
+                    "Type": row["partition"].get("type", ""),
+                }
+                for row in partition_rows
+            ]
+            st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+
+            for row in partition_rows:
+                p = row["partition"]
+                lang = "m" if str(p.get("type", "")).lower() == "m" else "dax"
+                with st.expander(f"🧩 {p.get('name', '(unnamed)')} — {row['table']} ({row['model']})"):
+                    st.markdown(f"- **Type:** {p.get('type', '-')}")
+                    if p.get("source"):
+                        st.code(p["source"], language=lang)
+                    else:
+                        st.info("No source expression.")
+        elif part_query:
+            st.info("No partitions match your search.")
+        else:
+            st.info("No partitions found in the selected model(s).")
 
     st.markdown("---")
     broken = engine.get_broken_references()
@@ -1982,11 +2054,11 @@ elif page == "⚠️ Issues":
 elif page == "🔎 Search":
     st.header("Search")
 
-    query = st.text_input("Search across all artifacts", placeholder="e.g. SQL03, KDK, Elevtal, table name...")
+    query = st.text_input("Search across all artifacts", placeholder="e.g. SQL03, KDK, Elevtal, table name, partition, M code...")
 
     if query:
         q = query.lower()
-        results = {"reports": [], "models": [], "data_sources": [], "issues": [], "tables": []}
+        results = {"reports": [], "models": [], "data_sources": [], "issues": [], "tables": [], "partitions": []}
 
         for r in lineage["reports"]:
             if q in r["name"].lower() or q in str(r.get("semantic_model_name", "")).lower() or q in str(r.get("path", "")).lower():
@@ -1999,6 +2071,16 @@ elif page == "🔎 Search":
             for t in m.get("tables", []):
                 if q in t["name"].lower():
                     results["tables"].append({"table": t, "model": m["name"]})
+                # Search inside partitions (name, type, and M source code)
+                for p in t.get("partitions", []):
+                    if (
+                        q in str(p.get("name", "")).lower()
+                        or q in str(p.get("type", "")).lower()
+                        or q in str(p.get("source", "")).lower()
+                    ):
+                        results["partitions"].append(
+                            {"partition": p, "table": t["name"], "model": m["name"]}
+                        )
 
         for ds in lineage["data_sources"]:
             if q in ds.lower():
@@ -2128,6 +2210,22 @@ elif page == "🔎 Search":
                             if p.get("source"):
                                 st.markdown(f"**M code ({p['name']}):**")
                                 st.code(p["source"][:800], language="m")
+
+        # ─── Partitions (matches inside tables) ─────────────────────────────────
+        if results["partitions"]:
+            st.subheader(f"🧩 Partitions ({len(results['partitions'])})")
+            for item in results["partitions"]:
+                p = item["partition"]
+                lang = "m" if str(p.get("type", "")).lower() == "m" else "dax"
+                header = f"🧩 {p['name']} — {item['table']} (in model: {item['model']})"
+                with st.expander(header):
+                    st.markdown(f"- **Partition:** `{p['name']}`")
+                    st.markdown(f"- **Type:** {p.get('type', '-')}")
+                    st.markdown(f"- **Table:** {item['table']}")
+                    st.markdown(f"- **Model:** {item['model']}")
+                    if p.get("source"):
+                        st.markdown("**Source expression:**")
+                        st.code(p["source"], language=lang)
 
         # ─── Data Sources ───────────────────────────────────────────────────────
         if results["data_sources"]:

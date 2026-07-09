@@ -110,7 +110,7 @@ def build_lineage_map(models: list[SemanticModelDef], reports: list[ReportDef]) 
                 "is_hidden": table.is_hidden,
                 "data_sources": table.data_sources,
                 "partitions": [
-                    {"name": p.name, "type": p.source_type, "source": p.source_expression[:200]}
+                    {"name": p.name, "type": p.source_type, "source": p.source_expression}
                     for p in table.partitions
                 ],
             }
